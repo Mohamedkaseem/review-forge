@@ -8,6 +8,7 @@ import { ReviewsTab } from '@/components/tabs/reviews'
 import { TrendsTab } from '@/components/tabs/trends'
 import { TeamTab } from '@/components/tabs/team'
 import { FeedbackTab } from '@/components/tabs/feedback'
+import { ClineAnalysisTab } from '@/components/tabs/cline-analysis'
 
 export interface DashboardData {
   stats: {
@@ -77,6 +78,8 @@ export default function Dashboard() {
         return <TeamTab data={data} loading={loading} />
       case 'feedback':
         return <FeedbackTab />
+      case 'cline':
+        return <ClineAnalysisTab repoConfig={repoConfig} />
       default:
         return <OverviewTab data={data} loading={loading} error={error} />
     }

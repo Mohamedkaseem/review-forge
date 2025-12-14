@@ -9,7 +9,8 @@ import {
   MessageSquare,
   Flame,
   Settings,
-  HelpCircle
+  HelpCircle,
+  Terminal
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -23,6 +24,7 @@ const navItems = [
   { id: 'trends', label: 'Trends', icon: TrendingUp },
   { id: 'team', label: 'Team', icon: Users },
   { id: 'feedback', label: 'Feedback', icon: MessageSquare },
+  { id: 'cline', label: 'Cline analysis', icon: Terminal },
 ]
 
 export function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
