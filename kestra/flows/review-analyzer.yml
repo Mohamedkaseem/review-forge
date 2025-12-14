@@ -1,0 +1,250 @@
+id: review-analyzer
+namespace: review-forge
+description: AI Agent workflow to analyze PR reviews and generate quality scores
+
+inputs:
+  - id: github_owner
+    type: STRING
+    defaults: "{{envs.GITHUB_OWNER}}"
+  - id: github_repo
+    type: STRING
+    defaults: "{{envs.GITHUB_REPO}}"
+  - id: pr_number
+    type: INT
+    required: false
+
+tasks:
+  - id: fetch_prs
+    type: io.kestra.plugin.scripts.python.Script
+    description: Fetch recent PRs from GitHub
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install requests
+    script: |
+      import requests
+      import json
+      import os
+      
+      owner = "{{inputs.github_owner}}"
+      repo = "{{inputs.github_repo}}"
+      token = os.environ.get("GITHUB_TOKEN", "")
+      
+      headers = {"Authorization": f"token {token}"} if token else {}
+      
+      if {{inputs.pr_number}}:
+          url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{{inputs.pr_number}}"
+          response = requests.get(url, headers=headers)
+          prs = [response.json()] if response.status_code == 200 else []
+      else:
+          url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=all&per_page=10"
+          response = requests.get(url, headers=headers)
+          prs = response.json() if response.status_code == 200 else []
+      
+      pr_data = []
+      for pr in prs:
+          pr_data.append({
+              "number": pr["number"],
+              "title": pr["title"],
+              "body": pr.get("body", ""),
+              "author": pr["user"]["login"],
+              "state": pr["state"],
+              "created_at": pr["created_at"]
+          })
+      
+      print(json.dumps({"prs": pr_data}))
+    outputFiles:
+      - "*.json"
+
+  - id: fetch_reviews
+    type: io.kestra.plugin.scripts.python.Script
+    description: Fetch reviews for each PR
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install requests
+    script: |
+      import requests
+      import json
+      import os
+      
+      owner = "{{inputs.github_owner}}"
+      repo = "{{inputs.github_repo}}"
+      token = os.environ.get("GITHUB_TOKEN", "")
+      prs = {{outputs.fetch_prs.vars.prs}}
+      
+      headers = {"Authorization": f"token {token}"} if token else {}
+      
+      all_reviews = []
+      for pr in prs:
+          pr_num = pr["number"]
+          
+          # Fetch reviews
+          reviews_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/reviews"
+          reviews_resp = requests.get(reviews_url, headers=headers)
+          reviews = reviews_resp.json() if reviews_resp.status_code == 200 else []
+          
+          # Fetch comments
+          comments_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/comments"
+          comments_resp = requests.get(comments_url, headers=headers)
+          comments = comments_resp.json() if comments_resp.status_code == 200 else []
+          
+          all_reviews.append({
+              "pr": pr,
+              "reviews": [{"author": r["user"]["login"], "body": r.get("body", ""), "state": r["state"]} for r in reviews],
+              "comments": [{"author": c["user"]["login"], "body": c["body"], "path": c.get("path", "")} for c in comments]
+          })
+      
+      print(json.dumps({"review_data": all_reviews}))
+
+  - id: ai_agent_analyze
+    type: io.kestra.plugin.scripts.python.Script
+    description: AI Agent to analyze and score reviews using Groq
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install groq
+    script: |
+      import json
+      import os
+      from groq import Groq
+      
+      review_data = {{outputs.fetch_reviews.vars.review_data}}
+      
+      client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+      
+      results = []
+      for item in review_data:
+          pr = item["pr"]
+          reviews = item["reviews"]
+          comments = item["comments"]
+          
+          if not reviews and not comments:
+              continue
+          
+          prompt = f"""You are a code review quality analyst. Analyze and respond ONLY with valid JSON.
+          
+          Analyze the quality of code reviews for this PR:
+          
+          PR #{pr["number"]}: {pr["title"]}
+          Description: {pr["body"][:500] if pr["body"] else "No description"}
+          
+          Reviews:
+          {json.dumps(reviews, indent=2)}
+          
+          Comments:
+          {json.dumps(comments[:10], indent=2)}
+          
+          Score the reviews on these dimensions (0-25 each):
+          1. Clarity: How clear and understandable
+          2. Completeness: Coverage of important aspects
+          3. Actionability: Specific and actionable feedback
+          4. Constructiveness: Helpful and professional tone
+          
+          Respond ONLY with this JSON format, no other text:
+          {{
+            "overall_score": <0-100>,
+            "clarity": <0-25>,
+            "completeness": <0-25>,
+            "actionability": <0-25>,
+            "constructiveness": <0-25>,
+            "summary": "<brief summary>",
+            "recommendations": ["<recommendation>"]
+          }}"""
+          
+          try:
+              response = client.chat.completions.create(
+                  model="llama-3.3-70b-versatile",
+                  messages=[{"role": "user", "content": prompt}],
+                  temperature=0.3,
+                  max_tokens=2048
+              )
+              text = (response.choices[0].message.content or "").replace('```json', '').replace('```', '').strip()
+              
+              analysis = json.loads(text)
+              analysis["pr_number"] = pr["number"]
+              analysis["pr_title"] = pr["title"]
+              results.append(analysis)
+          except Exception as e:
+              results.append({
+                  "pr_number": pr["number"],
+                  "pr_title": pr["title"],
+                  "error": str(e),
+                  "overall_score": 0
+              })
+      
+      print(json.dumps({"analyses": results}))
+
+  - id: ai_agent_decision
+    type: io.kestra.plugin.scripts.python.Script
+    description: AI Agent makes decisions based on analysis
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      
+      analyses = {{outputs.ai_agent_analyze.vars.analyses}}
+      
+      decisions = []
+      for analysis in analyses:
+          score = analysis.get("overall_score", 0)
+          pr_num = analysis.get("pr_number")
+          
+          decision = {
+              "pr_number": pr_num,
+              "score": score,
+              "action": "none",
+              "reason": ""
+          }
+          
+          if score < 50:
+              decision["action"] = "flag_for_review"
+              decision["reason"] = "Low review quality score - needs attention"
+          elif score < 70:
+              decision["action"] = "suggest_improvements"
+              decision["reason"] = "Moderate score - improvements recommended"
+          else:
+              decision["action"] = "approve"
+              decision["reason"] = "Good review quality"
+          
+          decisions.append(decision)
+      
+      summary = {
+          "total_analyzed": len(analyses),
+          "average_score": sum(a.get("overall_score", 0) for a in analyses) / len(analyses) if analyses else 0,
+          "flagged_count": len([d for d in decisions if d["action"] == "flag_for_review"]),
+          "decisions": decisions
+      }
+      
+      print(json.dumps(summary))
+
+  - id: store_results
+    type: io.kestra.plugin.scripts.python.Script
+    description: Store analysis results
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      from datetime import datetime
+      
+      analyses = {{outputs.ai_agent_analyze.vars.analyses}}
+      decisions = {{outputs.ai_agent_decision.vars}}
+      
+      result = {
+          "timestamp": datetime.utcnow().isoformat(),
+          "repository": "{{inputs.github_owner}}/{{inputs.github_repo}}",
+          "analyses": analyses,
+          "summary": decisions
+      }
+      
+      with open("review_analysis_results.json", "w") as f:
+          json.dump(result, f, indent=2)
+      
+      print(f"Analysis complete. Analyzed {len(analyses)} PRs.")
+      print(f"Average score: {decisions.get('average_score', 0):.1f}")
+      print(f"Flagged for review: {decisions.get('flagged_count', 0)}")
+    outputFiles:
+      - "review_analysis_results.json"
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 */6 * * *"
+    inputs:
+      github_owner: "{{envs.GITHUB_OWNER}}"
+      github_repo: "{{envs.GITHUB_REPO}}"

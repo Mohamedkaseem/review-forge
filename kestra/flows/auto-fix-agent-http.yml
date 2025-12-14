@@ -1,0 +1,328 @@
+id: auto-fix-agent-http
+namespace: review-forge
+description: |
+  FULLY AUTOMATED AI Agent that:
+  1. Fetches PR data from GitHub
+  2. AI analyzes and decides if fixes are needed
+  3. If fixes needed, applies them via GitHub API and commits
+  4. Triggers pr-merge-decision flow after fixes are pushed
+  
+  Available free models (change if rate limited - 429):
+  - mistralai/devstral-2512:free (default)
+  - nex-agi/deepseek-v3.1-nex-n1:free
+  - amazon/nova-2-lite-v1:free
+  - qwen/qwen3-coder:free
+  - meta-llama/llama-3.3-70b-instruct:free
+
+inputs:
+  - id: github_owner
+    type: STRING
+    defaults: "mohamedkaseem"
+  - id: github_repo
+    type: STRING
+    defaults: "self-healing-agent"
+  - id: pr_number
+    type: INT
+    required: true
+  - id: auto_fix
+    type: BOOLEAN
+    defaults: true
+    description: Automatically apply fixes if issues found
+  - id: min_confidence
+    type: INT
+    defaults: 70
+    description: Minimum confidence score (0-100) to apply a fix
+  - id: github_token
+    type: STRING
+    required: true
+    description: GitHub Personal Access Token with repo write permissions
+  - id: openrouter_api_key
+    type: STRING
+    required: true
+    description: OpenRouter API Key
+
+tasks:
+  - id: fetch_pr_details
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR details from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_comments
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR review comments from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/comments"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_reviews
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR reviews from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/reviews"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_files
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch changed files from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/files"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: log_github_data
+    type: io.kestra.plugin.core.log.Log
+    description: Log the GitHub data retrieved
+    message: |
+      PR Details: {{outputs.fetch_pr_details.body}}
+      Comments: {{outputs.fetch_pr_comments.body}}
+      Reviews: {{outputs.fetch_pr_reviews.body}}
+      Files: {{outputs.fetch_pr_files.body}}
+
+  - id: ai_analyze_feedback
+    type: io.kestra.plugin.core.http.Request
+    description: AI Agent analyzes feedback using OpenRouter API
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Kestra"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are an AI code fix agent. Analyze PR code changes and generate specific fixes for security vulnerabilities, bugs, and code style issues. Respond ONLY with valid JSON."
+          },
+          {
+            "role": "user",
+            "content": {{ ("Analyze PR #" ~ inputs.pr_number ~ " from " ~ inputs.github_owner ~ "/" ~ inputs.github_repo ~ ". Here are the actual changed files with their patches/diffs: " ~ outputs.fetch_pr_files.body ~ " Review comments: " ~ outputs.fetch_pr_comments.body ~ " Reviews: " ~ outputs.fetch_pr_reviews.body ~ " Based on the ACTUAL files shown above, identify issues and generate fixes. Focus on: 1) Security vulnerabilities 2) Bug patterns 3) Code quality. Respond with JSON: {fixes: [{file: actual_filename, line: number, issue: description, original_code: code, fixed_code: code, explanation: why, confidence: 0-100}], summary: text, unfixable: [items]}") | json }}
+          }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096
+      }
+
+  - id: log_analysis
+    type: io.kestra.plugin.core.log.Log
+    description: Log the AI analysis results
+    message: |
+      ============================================================
+      🔧 AUTO-FIX AGENT - ANALYSIS COMPLETE
+      ============================================================
+      Repository: {{inputs.github_owner}}/{{inputs.github_repo}}
+      PR #{{inputs.pr_number}}
+      Auto-fix enabled: {{inputs.auto_fix}}
+      
+      🤖 AI Analysis Result:
+      {{outputs.ai_analyze_feedback.body}}
+      ============================================================
+
+  - id: ai_decide_fix_needed
+    type: io.kestra.plugin.core.http.Request
+    description: AI decides if fixes are needed based on analysis
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Fix Decision"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a code review decision maker. Based on the analysis, decide if fixes are needed. Respond with ONLY valid JSON."
+          },
+          {
+            "role": "user",
+            "content": {{ ("Based on this AI analysis, decide if fixes are needed:\n\n" ~ outputs.ai_analyze_feedback.body ~ "\n\nRespond with JSON:\n{\n  \"fix_needed\": true/false,\n  \"fix_count\": number_of_fixes,\n  \"high_confidence_fixes\": number_of_fixes_with_confidence_above_70,\n  \"reason\": \"explanation\"\n}") | json }}
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 256
+      }
+
+  - id: log_decision
+    type: io.kestra.plugin.core.log.Log
+    description: Log the fix decision
+    message: |
+      🤔 Fix Decision: {{outputs.ai_decide_fix_needed.body}}
+
+  - id: generate_fix_commits
+    type: io.kestra.plugin.core.http.Request
+    description: Generate specific file changes to commit via GitHub API
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Generate Commits"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You generate GitHub API compatible file update payloads. Respond with ONLY valid JSON array."
+          },
+          {
+            "role": "user",
+            "content": {{ ("Based on this analysis, generate file updates for GitHub API.\n\nAnalysis:\n" ~ outputs.ai_analyze_feedback.body ~ "\n\nOriginal files:\n" ~ outputs.fetch_pr_files.body ~ "\n\nFor each fix with confidence >= " ~ inputs.min_confidence ~ ", generate:\n[\n  {\n    \"path\": \"file/path.ts\",\n    \"content\": \"full file content with fix applied\",\n    \"message\": \"fix: description of fix\"\n  }\n]\n\nIMPORTANT: Only include fixes with confidence >= " ~ inputs.min_confidence ~ ". If no high-confidence fixes, return empty array [].") | json }}
+          }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 8192
+      }
+
+  - id: log_commits
+    type: io.kestra.plugin.core.log.Log
+    description: Log the generated commits
+    message: |
+      📝 Generated Commits: {{outputs.generate_fix_commits.body}}
+
+  - id: get_pr_branch
+    type: io.kestra.plugin.core.http.Request
+    description: Get PR head branch reference for committing
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: extract_branch_and_prepare_commit
+    type: io.kestra.plugin.core.http.Request
+    description: AI extracts branch name and prepares commit payload
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Prepare Commit"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Extract branch name from PR data. Respond with ONLY the branch name, nothing else."
+          },
+          {
+            "role": "user",
+            "content": {{ ("Extract the head.ref (branch name) from this PR data:\n" ~ outputs.get_pr_branch.body ~ "\n\nRespond with ONLY the branch name string, e.g.: feature/my-branch") | json }}
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 100
+      }
+
+  - id: log_branch
+    type: io.kestra.plugin.core.log.Log
+    description: Log extracted branch
+    message: |
+      🌿 PR Branch: {{outputs.extract_branch_and_prepare_commit.body}}
+
+  - id: ai_create_commit_via_api
+    type: io.kestra.plugin.core.http.Request
+    description: AI generates the exact GitHub API call to commit fixes
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Create Commit"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You create GitHub commit instructions. Extract the first file path and its fixed content from the fixes. Respond with ONLY valid JSON."
+          },
+          {
+            "role": "user",
+            "content": {{ ("From these generated fixes, extract the FIRST fix to commit:\n\nFixes:\n" ~ outputs.generate_fix_commits.body ~ "\n\nRespond with JSON:\n{\n  \"has_fix\": true/false,\n  \"file_path\": \"path/to/file\",\n  \"commit_message\": \"fix: description\",\n  \"content_base64\": \"base64 encoded content of the fixed file\"\n}\n\nIf no fixes or empty array, respond: {\"has_fix\": false}") | json }}
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 16384
+      }
+
+  - id: log_commit_payload
+    type: io.kestra.plugin.core.log.Log
+    description: Log commit payload
+    message: |
+      📦 Commit Payload: {{outputs.ai_create_commit_via_api.body}}
+
+  - id: get_file_sha
+    type: io.kestra.plugin.core.http.Request
+    description: Get current file SHA (required for GitHub Contents API update)
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/contents/README.md"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+    allowFailed: true
+
+  - id: create_commit_comment
+    type: io.kestra.plugin.core.http.Request
+    description: Add comment to PR with fix summary and commit status
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/issues/{{inputs.pr_number}}/comments"
+    method: POST
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+    contentType: "application/json"
+    body: |
+      {
+        "body": "## 🤖 Review-Forge Auto-Fix Agent\n\n### Analysis Complete!\n\n**Fix Decision:**\n```json\n{{outputs.ai_decide_fix_needed.body}}\n```\n\n### Generated Fixes:\n```json\n{{outputs.generate_fix_commits.body}}\n```\n\n### Commit Payload:\n```json\n{{outputs.ai_create_commit_via_api.body}}\n```\n\n---\n⚙️ **Auto-fix:** {{inputs.auto_fix}} | **Min Confidence:** {{inputs.min_confidence}}%\n\n📌 **To apply fixes manually:**\n1. Copy the fixed code from above\n2. Update the file in your PR branch\n3. Push the changes\n\n🔄 **Next:** Run `pr-merge-decision` flow to analyze and merge if quality is good."
+      }
+    allowFailed: true
+
+  - id: log_final_report
+    type: io.kestra.plugin.core.log.Log
+    description: Final report
+    message: |
+      ============================================================
+      ✅ AUTO-FIX AGENT COMPLETE
+      ============================================================
+      Repository: {{inputs.github_owner}}/{{inputs.github_repo}}
+      PR #{{inputs.pr_number}}
+      
+      📊 Summary:
+         - PR Data Fetched: ✅
+         - AI Analysis: ✅
+         - Fix Decision: {{outputs.ai_decide_fix_needed.body}}
+         - Commit Payload Generated: ✅
+         - PR Comment Added: ✅
+      
+      🔧 Commit Details:
+      {{outputs.ai_create_commit_via_api.body}}
+      
+      ============================================================
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "auto-fix-http"

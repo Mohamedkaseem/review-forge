@@ -1,0 +1,109 @@
+id: feedback-training-http
+namespace: review-forge
+description: |
+  Workflow to check feedback status and trigger model retraining notification (HTTP-based, no Docker).
+  Available free models (change if rate limited - 429):
+  - mistralai/devstral-2512:free (default)
+  - nex-agi/deepseek-v3.1-nex-n1:free
+  - amazon/nova-2-lite-v1:free
+  - allenai/olmo-3-32b-think:free
+  - openai/gpt-oss-120b:free
+  - qwen/qwen3-coder:free
+  - google/gemma-3n-e2b-it:free
+  - google/gemma-3n-e4b-it:free
+  - meta-llama/llama-3.3-70b-instruct:free
+
+inputs:
+  - id: min_feedback_count
+    type: INT
+    defaults: 50
+  - id: force_train
+    type: BOOLEAN
+    defaults: false
+  - id: oumi_server_url
+    type: STRING
+    defaults: "http://host.docker.internal:8765"
+    description: URL of the Oumi training server
+  - id: openrouter_api_key
+    type: STRING
+    required: true
+    description: OpenRouter API Key for AI analysis
+
+tasks:
+  - id: check_training_server
+    type: io.kestra.plugin.core.http.Request
+    description: Check if Oumi training server is running and get metrics
+    uri: "{{inputs.oumi_server_url}}/metrics"
+    method: GET
+    options:
+      connectTimeout: PT5S
+      readTimeout: PT10S
+    allowFailed: true
+
+  - id: log_server_status
+    type: io.kestra.plugin.core.log.Log
+    description: Log the training server status
+    message: |
+      ============================================================
+      🔄 FEEDBACK TRAINING STATUS CHECK
+      ============================================================
+      Oumi Server URL: {{inputs.oumi_server_url}}
+      Min Feedback Required: {{inputs.min_feedback_count}}
+      Force Train: {{inputs.force_train}}
+      
+      📊 Server Response:
+      {{outputs.check_training_server.body}}
+      ============================================================
+
+  - id: ai_analyze_training_readiness
+    type: io.kestra.plugin.core.http.Request
+    description: AI analyzes if training should proceed
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Kestra"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a machine learning operations assistant. Analyze training metrics and provide recommendations. Respond ONLY with valid JSON."
+          },
+          {
+            "role": "user",
+            "content": "Analyze the following training server metrics and determine if model retraining should proceed.\n\nServer Response: {{outputs.check_training_server.body}}\n\nMinimum feedback count required: {{inputs.min_feedback_count}}\nForce training: {{inputs.force_train}}\n\nRespond with JSON: {\"should_train\": <true|false>, \"reason\": \"<explanation>\", \"feedback_count\": <number or 0 if unknown>, \"recommendations\": [\"<recommendation>\"], \"estimated_training_time\": \"<estimate>\"}"
+          }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1024
+      }
+
+  - id: log_training_decision
+    type: io.kestra.plugin.core.log.Log
+    description: Log the AI training decision
+    message: |
+      ============================================================
+      🤖 AI TRAINING DECISION
+      ============================================================
+      
+      Analysis Result:
+      {{outputs.ai_analyze_training_readiness.body}}
+      
+      ============================================================
+      
+      📝 Next Steps:
+      - If should_train is true, manually trigger training via Oumi dashboard
+      - Training dashboard: http://localhost:8765/dashboard
+      - Monitor training progress in real-time
+      
+      ============================================================
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "feedback-training-http"

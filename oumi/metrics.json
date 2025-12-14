@@ -1,0 +1,15 @@
+{
+  "status": "idle",
+  "epoch": 0,
+  "total_epochs": 10,
+  "loss": 0.0,
+  "reward": 0.0,
+  "samples": 0,
+  "history": {
+    "loss": [],
+    "reward": [],
+    "epochs": []
+  },
+  "current_step": "",
+  "steps_completed": []
+}

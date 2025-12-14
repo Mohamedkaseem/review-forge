@@ -1,0 +1,36 @@
+{
+  "name": "review-forge-mcp",
+  "version": "1.0.0",
+  "description": "MCP Server for Review-Forge - Extends Cline with code review quality analysis tools",
+  "main": "dist/index.js",
+  "bin": {
+    "review-forge-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "cline",
+    "code-review",
+    "ai"
+  ],
+  "author": "Review-Forge Team",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "groq-sdk": "^0.37.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

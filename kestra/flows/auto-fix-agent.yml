@@ -1,0 +1,330 @@
+id: auto-fix-agent
+namespace: review-forge
+description: AI Agent that automatically fixes code issues based on PR review feedback
+
+inputs:
+  - id: github_owner
+    type: STRING
+    defaults: "{{envs.GITHUB_OWNER}}"
+  - id: github_repo
+    type: STRING
+    defaults: "{{envs.GITHUB_REPO}}"
+  - id: pr_number
+    type: INT
+    required: true
+  - id: auto_commit
+    type: BOOLEAN
+    defaults: false
+    description: Whether to automatically commit fixes
+
+tasks:
+  - id: fetch_pr_and_reviews
+    type: io.kestra.plugin.scripts.python.Script
+    description: Fetch PR details and review comments from GitHub
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install requests
+    script: |
+      import requests
+      import json
+      import os
+      
+      owner = "{{inputs.github_owner}}"
+      repo = "{{inputs.github_repo}}"
+      pr_number = {{inputs.pr_number}}
+      token = os.environ.get("GITHUB_TOKEN", "")
+      
+      headers = {"Authorization": f"token {token}"} if token else {}
+      
+      # Fetch PR details
+      pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
+      pr_res = requests.get(pr_url, headers=headers)
+      pr = pr_res.json() if pr_res.status_code == 200 else {}
+      
+      # Fetch review comments
+      comments_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+      comments_res = requests.get(comments_url, headers=headers)
+      comments = comments_res.json() if comments_res.status_code == 200 else []
+      
+      # Fetch reviews
+      reviews_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+      reviews_res = requests.get(reviews_url, headers=headers)
+      reviews = reviews_res.json() if reviews_res.status_code == 200 else []
+      
+      # Fetch changed files
+      files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+      files_res = requests.get(files_url, headers=headers)
+      files = files_res.json() if files_res.status_code == 200 else []
+      
+      # Extract actionable feedback from reviews and comments
+      feedback = []
+      
+      for comment in comments:
+          if comment.get("body"):
+              feedback.append({
+                  "type": "inline_comment",
+                  "file": comment.get("path", ""),
+                  "line": comment.get("line") or comment.get("original_line"),
+                  "body": comment["body"],
+                  "author": comment.get("user", {}).get("login", "unknown")
+              })
+      
+      for review in reviews:
+          if review.get("body") and review.get("state") in ["CHANGES_REQUESTED", "COMMENTED"]:
+              feedback.append({
+                  "type": "review",
+                  "body": review["body"],
+                  "state": review["state"],
+                  "author": review.get("user", {}).get("login", "unknown")
+              })
+      
+      result = {
+          "pr": {
+              "number": pr.get("number"),
+              "title": pr.get("title", ""),
+              "branch": pr.get("head", {}).get("ref", ""),
+              "base": pr.get("base", {}).get("ref", "")
+          },
+          "feedback": feedback,
+          "files": [{"filename": f["filename"], "patch": f.get("patch", "")} for f in files[:10]]
+      }
+      
+      print(json.dumps(result))
+
+  - id: ai_analyze_feedback
+    type: io.kestra.plugin.scripts.python.Script
+    description: AI Agent analyzes feedback and decides what to fix
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install groq
+    script: |
+      import json
+      import os
+      from groq import Groq
+      
+      pr_data = {{outputs.fetch_pr_and_reviews.vars}}
+      feedback = pr_data.get("feedback", [])
+      files = pr_data.get("files", [])
+      
+      if not feedback:
+          print(json.dumps({"fixes": [], "message": "No feedback to process"}))
+          exit(0)
+      
+      client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+      
+      prompt_sections = [
+          "You are an AI code fix agent. Analyze the review feedback and generate specific code fixes.",
+          f"\nPR Title: {pr_data.get('pr', {}).get('title', '')}\n",
+          "Review Feedback:",
+          json.dumps(feedback, indent=2),
+          "\nChanged Files:",
+          json.dumps(files, indent=2),
+          (
+              "\nFor each actionable piece of feedback, generate a fix. Respond ONLY with JSON:\n"
+              "{\n"
+              '  "fixes": [\n'
+              '    {\n'
+              '      "file": "<filename>",\n'
+              '      "line": <line_number or null>,\n'
+              '      "issue": "<description of the issue from feedback>",\n'
+              '      "original_code": "<the problematic code snippet>",\n'
+              '      "fixed_code": "<the corrected code>",\n'
+              '      "explanation": "<why this fix addresses the feedback>",\n'
+              '      "confidence": <0-100>\n'
+              "    }\n"
+              "  ],\n"
+              '  "summary": "<overall summary of fixes>",\n'
+              '  "unfixable": ["<feedback that cannot be auto-fixed>"]\n'
+              "}"
+          )
+      ]
+      
+      prompt = "\n".join(prompt_sections)
+      
+      try:
+          response = client.chat.completions.create(
+              model="llama-3.3-70b-versatile",
+              messages=[{"role": "user", "content": prompt}],
+              temperature=0.3,
+              max_tokens=4096
+          )
+          text = (response.choices[0].message.content or "").replace('```json', '').replace('```', '').strip()
+          result = json.loads(text)
+          print(json.dumps(result))
+      except Exception as e:
+          print(json.dumps({"fixes": [], "error": str(e)}))
+
+  - id: ai_agent_decision
+    type: io.kestra.plugin.scripts.python.Script
+    description: AI Agent decides which fixes to apply based on confidence
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      
+      analysis = {{outputs.ai_analyze_feedback.vars}}
+      fixes = analysis.get("fixes", [])
+      
+      # Filter fixes by confidence threshold
+      CONFIDENCE_THRESHOLD = 70
+      
+      approved_fixes = []
+      rejected_fixes = []
+      
+      for fix in fixes:
+          confidence = fix.get("confidence", 0)
+          if confidence >= CONFIDENCE_THRESHOLD:
+              fix["decision"] = "APPLY"
+              fix["reason"] = f"High confidence ({confidence}%) - auto-applying"
+              approved_fixes.append(fix)
+          else:
+              fix["decision"] = "REVIEW"
+              fix["reason"] = f"Low confidence ({confidence}%) - needs human review"
+              rejected_fixes.append(fix)
+      
+      decision = {
+          "total_fixes": len(fixes),
+          "approved_count": len(approved_fixes),
+          "rejected_count": len(rejected_fixes),
+          "approved_fixes": approved_fixes,
+          "rejected_fixes": rejected_fixes,
+          "summary": analysis.get("summary", ""),
+          "unfixable": analysis.get("unfixable", [])
+      }
+      
+      print(json.dumps(decision))
+
+  - id: generate_fix_report
+    type: io.kestra.plugin.scripts.python.Script
+    description: Generate a report of all fixes
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      from datetime import datetime
+      
+      pr_data = {{outputs.fetch_pr_and_reviews.vars}}
+      decision = {{outputs.ai_agent_decision.vars}}
+      
+      report = {
+          "timestamp": datetime.utcnow().isoformat(),
+          "repository": "{{inputs.github_owner}}/{{inputs.github_repo}}",
+          "pr_number": {{inputs.pr_number}},
+          "pr_title": pr_data.get("pr", {}).get("title", ""),
+          "auto_commit": {{inputs.auto_commit}},
+          "summary": {
+              "total_feedback_items": len(pr_data.get("feedback", [])),
+              "total_fixes_generated": decision.get("total_fixes", 0),
+              "fixes_approved": decision.get("approved_count", 0),
+              "fixes_need_review": decision.get("rejected_count", 0)
+          },
+          "approved_fixes": decision.get("approved_fixes", []),
+          "needs_review": decision.get("rejected_fixes", []),
+          "unfixable_items": decision.get("unfixable", [])
+      }
+      
+      print("=" * 60)
+      print("🔧 AUTO-FIX AGENT REPORT")
+      print("=" * 60)
+      print(f"Repository: {report['repository']}")
+      print(f"PR #{report['pr_number']}: {report['pr_title']}")
+      print(f"Timestamp: {report['timestamp']}")
+      print()
+      print(f"📊 Summary:")
+      print(f"   - Feedback items analyzed: {report['summary']['total_feedback_items']}")
+      print(f"   - Fixes generated: {report['summary']['total_fixes_generated']}")
+      print(f"   - Auto-approved (high confidence): {report['summary']['fixes_approved']}")
+      print(f"   - Needs human review: {report['summary']['fixes_need_review']}")
+      print()
+      
+      if report['approved_fixes']:
+          print("✅ APPROVED FIXES (Auto-apply ready):")
+          for i, fix in enumerate(report['approved_fixes'], 1):
+              print(f"   {i}. {fix.get('file', 'unknown')}:{fix.get('line', '?')}")
+              print(f"      Issue: {fix.get('issue', '')[:80]}")
+              print(f"      Confidence: {fix.get('confidence', 0)}%")
+          print()
+      
+      if report['needs_review']:
+          print("⚠️  NEEDS HUMAN REVIEW:")
+          for i, fix in enumerate(report['needs_review'], 1):
+              print(f"   {i}. {fix.get('file', 'unknown')}:{fix.get('line', '?')}")
+              print(f"      Issue: {fix.get('issue', '')[:80]}")
+              print(f"      Confidence: {fix.get('confidence', 0)}%")
+          print()
+      
+      if report['unfixable_items']:
+          print("❌ UNFIXABLE (Manual intervention required):")
+          for item in report['unfixable_items']:
+              print(f"   - {item[:80]}")
+      
+      print("=" * 60)
+      
+      # Output as JSON for downstream processing
+      with open("auto_fix_report.json", "w") as f:
+          json.dump(report, f, indent=2)
+    outputFiles:
+      - "auto_fix_report.json"
+
+  - id: create_fix_branch
+    type: io.kestra.plugin.scripts.python.Script
+    description: Create a branch with the fixes (if auto_commit is enabled)
+    containerImage: python:3.11-slim
+    runIf: "{{inputs.auto_commit}}"
+    beforeCommands:
+      - pip install requests
+    script: |
+      import requests
+      import json
+      import os
+      import base64
+      
+      owner = "{{inputs.github_owner}}"
+      repo = "{{inputs.github_repo}}"
+      pr_number = {{inputs.pr_number}}
+      token = os.environ.get("GITHUB_TOKEN", "")
+      
+      decision = {{outputs.ai_agent_decision.vars}}
+      pr_data = {{outputs.fetch_pr_and_reviews.vars}}
+      
+      approved_fixes = decision.get("approved_fixes", [])
+      
+      if not approved_fixes:
+          print(json.dumps({"message": "No approved fixes to commit", "branch": None}))
+          exit(0)
+      
+      headers = {
+          "Authorization": f"token {token}",
+          "Accept": "application/vnd.github.v3+json"
+      }
+      
+      # Get the PR's head branch SHA
+      branch_name = pr_data.get("pr", {}).get("branch", "")
+      ref_url = f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{branch_name}"
+      ref_res = requests.get(ref_url, headers=headers)
+      
+      if ref_res.status_code != 200:
+          print(json.dumps({"error": "Could not get branch reference", "branch": None}))
+          exit(1)
+      
+      base_sha = ref_res.json()["object"]["sha"]
+      
+      # Create new branch for fixes
+      fix_branch = f"auto-fix/pr-{pr_number}"
+      create_ref_url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+      create_res = requests.post(create_ref_url, headers=headers, json={
+          "ref": f"refs/heads/{fix_branch}",
+          "sha": base_sha
+      })
+      
+      result = {
+          "branch": fix_branch,
+          "base_sha": base_sha,
+          "fixes_count": len(approved_fixes),
+          "status": "branch_created" if create_res.status_code == 201 else "branch_exists"
+      }
+      
+      print(json.dumps(result))
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "auto-fix-{{inputs.github_repo}}"

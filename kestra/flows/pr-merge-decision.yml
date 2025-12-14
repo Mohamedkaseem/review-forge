@@ -1,0 +1,195 @@
+id: pr-merge-decision
+namespace: review-forge
+description: |
+  Analyze PR after fixes are pushed and decide whether to merge.
+  Manually trigger this flow after Cline CLI pushes fixes.
+  If review score is high enough (>= 70), merge the PR. Otherwise, don't merge.
+  
+  Available free models (change if rate limited - 429):
+  - mistralai/devstral-2512:free (default)
+  - nex-agi/deepseek-v3.1-nex-n1:free
+  - amazon/nova-2-lite-v1:free
+  - qwen/qwen3-coder:free
+  - meta-llama/llama-3.3-70b-instruct:free
+
+inputs:
+  - id: github_owner
+    type: STRING
+    defaults: "mohamedkaseem"
+  - id: github_repo
+    type: STRING
+    defaults: "self-healing-agent"
+  - id: pr_number
+    type: INT
+    required: true
+  - id: min_score_to_merge
+    type: INT
+    defaults: 70
+    description: Minimum review quality score required to auto-merge (0-100)
+  - id: github_token
+    type: STRING
+    required: true
+    description: GitHub Personal Access Token with repo permissions
+  - id: openrouter_api_key
+    type: STRING
+    required: true
+    description: OpenRouter API Key
+
+tasks:
+  - id: fetch_pr_details
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR details from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_reviews
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR reviews from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/reviews"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_comments
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch PR review comments from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/comments"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: fetch_pr_files
+    type: io.kestra.plugin.core.http.Request
+    description: Fetch changed files from GitHub
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/files"
+    method: GET
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+
+  - id: ai_analyze_pr_quality
+    type: io.kestra.plugin.core.http.Request
+    description: AI analyzes PR quality to decide if merge is safe
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Kestra Merge Decision"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a code review quality analyst. Analyze PR reviews and determine if the PR is ready to merge. Respond ONLY with valid JSON."
+          },
+          {
+            "role": "user",
+            "content": {{ ("Analyze PR #" ~ inputs.pr_number ~ " from " ~ inputs.github_owner ~ "/" ~ inputs.github_repo ~ " and determine if it should be merged.\n\nPR Details: " ~ outputs.fetch_pr_details.body ~ "\n\nReviews: " ~ outputs.fetch_pr_reviews.body ~ "\n\nComments: " ~ outputs.fetch_pr_comments.body ~ "\n\nChanged Files: " ~ outputs.fetch_pr_files.body ~ "\n\nAnalyze the reviews and comments. Score the overall review quality on these dimensions (0-25 each):\n1. Clarity - Are reviews clear?\n2. Completeness - Do reviews cover important aspects?\n3. Actionability - Are suggestions actionable?\n4. Constructiveness - Is feedback constructive?\n\nAlso check:\n- Are there any unresolved critical issues?\n- Have all review comments been addressed?\n- Is the code quality acceptable?\n\nRespond with JSON:\n{\n  \"overall_score\": <0-100>,\n  \"clarity\": <0-25>,\n  \"completeness\": <0-25>,\n  \"actionability\": <0-25>,\n  \"constructiveness\": <0-25>,\n  \"unresolved_issues\": [\"list of unresolved issues\"],\n  \"merge_recommendation\": \"MERGE\" | \"DO_NOT_MERGE\",\n  \"merge_reason\": \"explanation of recommendation\",\n  \"risk_level\": \"LOW\" | \"MEDIUM\" | \"HIGH\"\n}") | json }}
+          }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048
+      }
+
+  - id: log_analysis
+    type: io.kestra.plugin.core.log.Log
+    description: Log the AI analysis result
+    message: |
+      ============================================================
+      🔍 PR MERGE DECISION ANALYSIS
+      ============================================================
+      Repository: {{inputs.github_owner}}/{{inputs.github_repo}}
+      PR #{{inputs.pr_number}}
+      Minimum Score Required: {{inputs.min_score_to_merge}}
+      
+      🤖 AI Analysis:
+      {{outputs.ai_analyze_pr_quality.body}}
+      ============================================================
+
+  - id: parse_decision
+    type: io.kestra.plugin.core.http.Request
+    description: Parse AI response and extract merge decision
+    uri: "https://openrouter.ai/api/v1/chat/completions"
+    method: POST
+    headers:
+      Authorization: "Bearer {{inputs.openrouter_api_key}}"
+      Content-Type: "application/json"
+      HTTP-Referer: "https://review-forge.dev"
+      X-Title: "Review-Forge Parse Decision"
+    contentType: "application/json"
+    body: |
+      {
+        "model": "mistralai/devstral-2512:free",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Extract the overall_score and merge_recommendation from the JSON. Respond with ONLY: SCORE:<number> DECISION:<MERGE or DO_NOT_MERGE>"
+          },
+          {
+            "role": "user",
+            "content": {{ ("Extract score and decision from: " ~ outputs.ai_analyze_pr_quality.body) | json }}
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 50
+      }
+
+  - id: log_decision
+    type: io.kestra.plugin.core.log.Log
+    description: Log the parsed decision
+    message: |
+      📊 Parsed Decision: {{outputs.parse_decision.body}}
+
+  - id: merge_pr
+    type: io.kestra.plugin.core.http.Request
+    description: Merge the PR if score is high enough
+    uri: "https://api.github.com/repos/{{inputs.github_owner}}/{{inputs.github_repo}}/pulls/{{inputs.pr_number}}/merge"
+    method: PUT
+    headers:
+      Authorization: "token {{inputs.github_token}}"
+      Accept: "application/vnd.github.v3+json"
+    contentType: "application/json"
+    body: |
+      {
+        "commit_title": "Merge PR #{{inputs.pr_number}} - Auto-merged by Review-Forge",
+        "commit_message": "This PR was automatically merged after passing review quality checks.\n\nMerged by Review-Forge Kestra workflow.",
+        "merge_method": "squash"
+      }
+    allowFailed: true
+
+  - id: log_merge_result
+    type: io.kestra.plugin.core.log.Log
+    description: Log the merge result
+    message: |
+      ============================================================
+      🎯 MERGE RESULT
+      ============================================================
+      Repository: {{inputs.github_owner}}/{{inputs.github_repo}}
+      PR #{{inputs.pr_number}}
+      
+      Merge API Response:
+      {{outputs.merge_pr.body}}
+      
+      Status Code: {{outputs.merge_pr.code}}
+      
+      {{#if outputs.merge_pr.code == 200}}
+      ✅ PR MERGED SUCCESSFULLY!
+      {{else}}
+      ⚠️ Merge may have failed or PR was not ready.
+      Check the response above for details.
+      {{/if}}
+      ============================================================
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "pr-merge-decision"

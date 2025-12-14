@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oumi GRPO Training Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse-slow { animation: pulse 2s ease-in-out infinite; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-orange-500 mb-2">🔥 Oumi GRPO Training</h1>
+            <p class="text-gray-400">Review-Forge Model Fine-tuning with Reinforcement Learning</p>
+        </div>
+
+        <!-- Status Card -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h2 class="text-xl font-semibold mb-2">Training Status</h2>
+                    <p class="text-gray-400">Model: TinyLlama-1.1B + LoRA</p>
+                </div>
+                <div id="status" class="flex items-center">
+                    <span class="w-3 h-3 bg-green-500 rounded-full animate-pulse-slow mr-2"></span>
+                    <span class="text-green-400 font-medium">Training in Progress</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-gray-800 rounded-lg p-4">
+                <p class="text-gray-400 text-sm">Current Epoch</p>
+                <p id="epoch" class="text-3xl font-bold text-blue-400">1/10</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <p class="text-gray-400 text-sm">Training Loss</p>
+                <p id="loss" class="text-3xl font-bold text-red-400">2.45</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <p class="text-gray-400 text-sm">Reward Score</p>
+                <p id="reward" class="text-3xl font-bold text-green-400">0.32</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <p class="text-gray-400 text-sm">Feedback Samples</p>
+                <p id="samples" class="text-3xl font-bold text-purple-400">847</p>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h3 class="text-lg font-semibold mb-4">Training Loss</h3>
+                <canvas id="lossChart" height="200"></canvas>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h3 class="text-lg font-semibold mb-4">Reward Score</h3>
+                <canvas id="rewardChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- GRPO Process -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-6">
+            <h3 class="text-lg font-semibold mb-4">GRPO Training Process</h3>
+            <div class="flex items-center justify-between">
+                <div id="step1" class="flex-1 text-center p-4 bg-green-900 rounded-lg mx-1">
+                    <div class="text-2xl mb-2">📥</div>
+                    <p class="font-medium">Load Feedback</p>
+                    <p class="text-xs text-gray-400">from submit_feedback</p>
+                </div>
+                <div class="text-gray-500">→</div>
+                <div id="step2" class="flex-1 text-center p-4 bg-blue-900 rounded-lg mx-1 animate-pulse-slow">
+                    <div class="text-2xl mb-2">🎲</div>
+                    <p class="font-medium">Generate</p>
+                    <p class="text-xs text-gray-400">Multiple responses</p>
+                </div>
+                <div class="text-gray-500">→</div>
+                <div id="step3" class="flex-1 text-center p-4 bg-gray-700 rounded-lg mx-1">
+                    <div class="text-2xl mb-2">⚖️</div>
+                    <p class="font-medium">Compute Reward</p>
+                    <p class="text-xs text-gray-400">Score each response</p>
+                </div>
+                <div class="text-gray-500">→</div>
+                <div id="step4" class="flex-1 text-center p-4 bg-gray-700 rounded-lg mx-1">
+                    <div class="text-2xl mb-2">📈</div>
+                    <p class="font-medium">Update Weights</p>
+                    <p class="text-xs text-gray-400">Policy gradient</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reward Function -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-6">
+            <h3 class="text-lg font-semibold mb-4">Reward Function Breakdown</h3>
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Has "Score:"</p>
+                    <p class="text-lg font-bold text-green-400">+0.3</p>
+                </div>
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Has "/25"</p>
+                    <p class="text-lg font-bold text-green-400">+0.2</p>
+                </div>
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Clarity</p>
+                    <p class="text-lg font-bold text-blue-400">+0.1</p>
+                </div>
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Completeness</p>
+                    <p class="text-lg font-bold text-blue-400">+0.1</p>
+                </div>
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Actionability</p>
+                    <p class="text-lg font-bold text-blue-400">+0.1</p>
+                </div>
+                <div class="bg-gray-700 p-3 rounded text-center">
+                    <p class="text-xs text-gray-400">Constructiveness</p>
+                    <p class="text-lg font-bold text-blue-400">+0.1</p>
+                </div>
+            </div>
+            <p class="text-center mt-4 text-gray-400">Max Reward: <span class="text-green-400 font-bold">1.0</span></p>
+        </div>
+
+        <!-- Sample Training Data -->
+        <div class="bg-gray-800 rounded-lg p-6">
+            <h3 class="text-lg font-semibold mb-4">Latest Training Samples</h3>
+            <div class="space-y-3">
+                <div class="bg-gray-700 p-4 rounded-lg">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="text-green-400 font-medium">✓ Chosen (Good)</span>
+                        <span class="text-sm text-gray-400">Reward: 0.9</span>
+                    </div>
+                    <p class="text-sm text-gray-300">"Score: 75/100 | Clarity: 20/25 | Completeness: 18/25 | Actionability: 19/25 | Constructiveness: 18/25"</p>
+                </div>
+                <div class="bg-gray-700 p-4 rounded-lg">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="text-red-400 font-medium">✗ Rejected (Bad)</span>
+                        <span class="text-sm text-gray-400">Reward: 0.1</span>
+                    </div>
+                    <p class="text-sm text-gray-300">"This review is okay I guess"</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="text-center mt-8 text-gray-500">
+            <p>Powered by Oumi GRPO | TRL | LoRA Fine-tuning</p>
+        </div>
+    </div>
+
+    <script>
+        // Simulated training data
+        let epoch = 1;
+        let lossData = [2.8];
+        let rewardData = [0.25];
+        const labels = ['0'];
+
+        // Chart configurations
+        const chartConfig = {
+            type: 'line',
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { color: '#374151' }, ticks: { color: '#9CA3AF' } },
+                    y: { grid: { color: '#374151' }, ticks: { color: '#9CA3AF' } }
+                }
+            }
+        };
+
+        const lossChart = new Chart(document.getElementById('lossChart'), {
+            ...chartConfig,
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: lossData,
+                    borderColor: '#EF4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            }
+        });
+
+        const rewardChart = new Chart(document.getElementById('rewardChart'), {
+            ...chartConfig,
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: rewardData,
+                    borderColor: '#10B981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            }
+        });
+
+        // Simulate training progress
+        function updateTraining() {
+            if (epoch <= 10) {
+                // Update metrics
+                const newLoss = Math.max(0.5, 2.8 - (epoch * 0.2) + (Math.random() * 0.1 - 0.05));
+                const newReward = Math.min(0.95, 0.25 + (epoch * 0.07) + (Math.random() * 0.05 - 0.025));
+                
+                lossData.push(newLoss);
+                rewardData.push(newReward);
+                labels.push(String(epoch));
+
+                document.getElementById('epoch').textContent = `${epoch}/10`;
+                document.getElementById('loss').textContent = newLoss.toFixed(2);
+                document.getElementById('reward').textContent = newReward.toFixed(2);
+                document.getElementById('samples').textContent = 847 + (epoch * 23);
+
+                lossChart.update();
+                rewardChart.update();
+
+                // Update process steps
+                const steps = ['step1', 'step2', 'step3', 'step4'];
+                steps.forEach((s, i) => {
+                    const el = document.getElementById(s);
+                    el.classList.remove('animate-pulse-slow', 'bg-blue-900', 'bg-green-900', 'bg-gray-700');
+                    if (i < (epoch % 4)) {
+                        el.classList.add('bg-green-900');
+                    } else if (i === (epoch % 4)) {
+                        el.classList.add('bg-blue-900', 'animate-pulse-slow');
+                    } else {
+                        el.classList.add('bg-gray-700');
+                    }
+                });
+
+                epoch++;
+                setTimeout(updateTraining, 2000);
+            } else {
+                document.getElementById('status').innerHTML = `
+                    <span class="w-3 h-3 bg-green-500 rounded-full mr-2"></span>
+                    <span class="text-green-400 font-medium">Training Complete! ✓</span>
+                `;
+            }
+        }
+
+        // Start simulation after 1 second
+        setTimeout(updateTraining, 1000);
+    </script>
+</body>
+</html>

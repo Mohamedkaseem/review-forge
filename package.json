@@ -1,0 +1,36 @@
+{
+  "name": "review-forge",
+  "version": "1.0.0",
+  "description": "AI-powered code review quality scorer with learning feedback loop - Forging better code reviews through AI",
+  "private": true,
+  "workspaces": [
+    "cli",
+    "dashboard",
+    "mcp-server"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=dashboard",
+    "build": "npm run build --workspace=dashboard",
+    "cli": "npm run start --workspace=cli",
+    "lint": "npm run lint --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "keywords": [
+    "code-review",
+    "ai",
+    "cline",
+    "kestra",
+    "oumi",
+    "vercel",
+    "coderabbit",
+    "hackathon"
+  ],
+  "author": "Review-Forge Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "python": "^0.0.4"
+  }
+}

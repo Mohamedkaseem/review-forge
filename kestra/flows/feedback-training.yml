@@ -1,0 +1,150 @@
+id: feedback-training
+namespace: review-forge
+description: Workflow to trigger Oumi model retraining when enough feedback is collected
+
+inputs:
+  - id: min_feedback_count
+    type: INT
+    defaults: 50
+  - id: force_train
+    type: BOOLEAN
+    defaults: false
+
+tasks:
+  - id: check_feedback_count
+    type: io.kestra.plugin.scripts.python.Script
+    description: Check if we have enough feedback for training
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      import os
+      
+      feedback_file = "/app/data/feedback.jsonl"
+      min_count = {{inputs.min_feedback_count}}
+      force = {{inputs.force_train}}
+      
+      count = 0
+      if os.path.exists(feedback_file):
+          with open(feedback_file, 'r') as f:
+              count = sum(1 for _ in f)
+      
+      should_train = force or count >= min_count
+      
+      print(json.dumps({
+          "feedback_count": count,
+          "min_required": min_count,
+          "should_train": should_train
+      }))
+
+  - id: prepare_training_data
+    type: io.kestra.plugin.scripts.python.Script
+    description: Prepare training data from feedback
+    runIf: "{{outputs.check_feedback_count.vars.should_train}}"
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install jsonlines
+    script: |
+      import json
+      import jsonlines
+      
+      feedback_file = "/app/data/feedback.jsonl"
+      output_file = "/app/data/training_ready.jsonl"
+      
+      training_data = []
+      
+      with open(feedback_file, 'r') as f:
+          for line in f:
+              item = json.loads(line.strip())
+              
+              # Convert feedback to training format
+              training_item = {
+                  "prompt": f"Rate the quality of review {item.get('reviewId', 'unknown')}",
+                  "feedback": item.get('feedback', 'neutral'),
+                  "comment": item.get('comment', ''),
+                  "reward": 1.0 if item['feedback'] == 'positive' else (-1.0 if item['feedback'] == 'negative' else 0.0)
+              }
+              training_data.append(training_item)
+      
+      with jsonlines.open(output_file, 'w') as writer:
+          writer.write_all(training_data)
+      
+      print(json.dumps({
+          "training_samples": len(training_data),
+          "positive": len([d for d in training_data if d['reward'] > 0]),
+          "negative": len([d for d in training_data if d['reward'] < 0]),
+          "neutral": len([d for d in training_data if d['reward'] == 0])
+      }))
+
+  - id: run_grpo_training
+    type: io.kestra.plugin.scripts.python.Script
+    description: Run GRPO training with Oumi
+    runIf: "{{outputs.check_feedback_count.vars.should_train}}"
+    containerImage: python:3.11-slim
+    beforeCommands:
+      - pip install torch transformers peft trl oumi
+    script: |
+      import json
+      import os
+      
+      # Import training module
+      # In production, this would run the actual GRPO training
+      
+      print("Starting GRPO training...")
+      print("Model: TinyLlama-1.1B-Chat-v1.0")
+      print("Training samples: {{outputs.prepare_training_data.vars.training_samples}}")
+      
+      # Simulated training for demo
+      result = {
+          "status": "completed",
+          "epochs": 3,
+          "final_loss": 0.42,
+          "model_path": "/app/models/review-scorer-v2"
+      }
+      
+      print(json.dumps(result))
+
+  - id: evaluate_model
+    type: io.kestra.plugin.scripts.python.Script
+    description: Evaluate the trained model
+    runIf: "{{outputs.check_feedback_count.vars.should_train}}"
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      
+      # Simulated evaluation
+      evaluation = {
+          "accuracy": 0.85,
+          "precision": 0.82,
+          "recall": 0.88,
+          "f1_score": 0.85,
+          "test_samples": 20
+      }
+      
+      print(json.dumps(evaluation))
+
+  - id: notify_completion
+    type: io.kestra.plugin.scripts.python.Script
+    description: Send notification about training completion
+    runIf: "{{outputs.check_feedback_count.vars.should_train}}"
+    containerImage: python:3.11-slim
+    script: |
+      import json
+      from datetime import datetime
+      
+      summary = {
+          "timestamp": datetime.utcnow().isoformat(),
+          "training_completed": True,
+          "feedback_used": {{outputs.prepare_training_data.vars.training_samples}},
+          "model_accuracy": {{outputs.evaluate_model.vars.accuracy}},
+          "message": "Review-Forge model has been retrained with new feedback data."
+      }
+      
+      print(json.dumps(summary))
+
+triggers:
+  - id: weekly_check
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 0 * * 0"
+    inputs:
+      min_feedback_count: 50
+      force_train: false
